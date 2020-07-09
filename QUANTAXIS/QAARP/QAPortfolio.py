@@ -2,7 +2,7 @@
 #
 # The MIT License (MIT)
 #
-# Copyright (c) 2016-2018 yutiansut/QUANTAXIS
+# Copyright (c) 2016-2019 yutiansut/QUANTAXIS
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,7 @@ from functools import lru_cache
 import pandas as pd
 
 from QUANTAXIS.QAARP.QAAccount import QA_Account
+from QUANTAXIS.QAARP.QAAccountPro import QA_AccountPRO
 from QUANTAXIS.QAARP.QARisk import QA_Performance, QA_Risk
 from QUANTAXIS.QAUtil import (
     DATABASE,
@@ -185,6 +186,7 @@ class QA_Portfolio(QA_Account):
     def init_hold(self):
         return self.init_hold_table.groupby('code').sum()
 
+
     @property
     def cash_available(self):
         return self.cash[-1]
@@ -218,20 +220,108 @@ class QA_Portfolio(QA_Account):
 
         if account_cookie in self.account_list:
             res = self.account_list.remove(account_cookie)
+
+            try:
+                DATABASE.account.find_one_and_delete({
+                    'account_cookie': account_cookie,
+                    'portfolio_cookie': self.portfolio_cookie,
+                    'user_cookie': self.user_cookie
+                })
+            except:
+                pass
+
             self.cash.append(
                 self.cash[-1] + self.get_account_by_cookie(res).init_cash
             )
+            self.save()
             return True
+
         else:
             raise RuntimeError(
                 'account {} is not in the portfolio'.format(account_cookie)
             )
+
+    def new_accountpro(
+            self,
+            account_cookie=None,
+            init_cash=1000000,
+            market_type=MARKET_TYPE.STOCK_CN,
+            auto_reload=True,
+            *args,
+            **kwargs
+    ):
+        """创建一个新的Account
+
+        Keyword Arguments:
+            account_cookie {[type]} -- [description] (default: {None})
+
+        Returns:
+            [type] -- [description]
+        """
+
+        if account_cookie is None:
+            """创建新的account
+
+            Returns:
+                [type] -- [description]
+            """
+            # 如果组合的cash_available>创建新的account所需cash
+            if self.cash_available >= init_cash:
+
+                temp = QA_AccountPRO(
+                    user_cookie=self.user_cookie,
+                    portfolio_cookie=self.portfolio_cookie,
+                    init_cash=init_cash,
+                    market_type=market_type,
+                    auto_reload=auto_reload,
+                    *args,
+                    **kwargs
+                )
+                if temp.account_cookie not in self.account_list:
+                    #self.accounts[temp.account_cookie] = temp
+                    self.account_list.append(temp.account_cookie)
+                    temp.save()
+                    self.cash.append(self.cash_available - init_cash)
+                    return temp
+
+                else:
+                    return self.new_accountpro()
+        else:
+            if self.cash_available >= init_cash:
+                if account_cookie not in self.account_list:
+
+                    acc = QA_AccountPRO(
+                        portfolio_cookie=self.portfolio_cookie,
+                        user_cookie=self.user_cookie,
+                        init_cash=init_cash,
+                        market_type=market_type,
+                        account_cookie=account_cookie,
+                        auto_reload=auto_reload,
+                        *args,
+                        **kwargs
+                    )
+                    acc.save()
+                    self.account_list.append(acc.account_cookie)
+                    self.cash.append(self.cash_available - init_cash)
+                    return acc
+                else:
+                    return QA_AccountPRO(
+                        account_cookie=account_cookie,
+                        user_cookie=self.user_cookie,
+                        portfolio_cookie=self.portfolio_cookie,
+                        init_cash=init_cash,
+                        market_type=market_type,
+                        auto_reload=auto_reload,
+                        *args,
+                        **kwargs
+                    )
 
     def new_account(
             self,
             account_cookie=None,
             init_cash=1000000,
             market_type=MARKET_TYPE.STOCK_CN,
+            auto_reload=True,
             *args,
             **kwargs
     ):
@@ -258,6 +348,7 @@ class QA_Portfolio(QA_Account):
                     portfolio_cookie=self.portfolio_cookie,
                     init_cash=init_cash,
                     market_type=market_type,
+                    auto_reload=auto_reload,
                     *args,
                     **kwargs
                 )
@@ -280,6 +371,7 @@ class QA_Portfolio(QA_Account):
                         init_cash=init_cash,
                         market_type=market_type,
                         account_cookie=account_cookie,
+                        auto_reload=auto_reload,
                         *args,
                         **kwargs
                     )
@@ -288,9 +380,17 @@ class QA_Portfolio(QA_Account):
                     self.cash.append(self.cash_available - init_cash)
                     return acc
                 else:
-                    return self.get_account_by_cookie(account_cookie)
+                    return self.get_account_by_cookie(account_cookie, auto_reload=auto_reload)
 
-    def get_account_by_cookie(self, cookie):
+    def create_stockaccount(self, account_cookie, init_cash, init_hold):
+        return self.new_account(account_cookie=account_cookie, init_cash=init_cash, init_hold=init_hold,
+                                market_type=MARKET_TYPE.STOCK_CN, allow_t0=False,)
+
+    def create_futureaccount(self, account_cookie, init_cash, init_hold, reload):
+        return self.new_account(account_cookie=account_cookie, init_cash=init_cash, init_hold=init_hold,
+                                market_type=MARKET_TYPE.FUTURE_CN, allow_t0=False,)
+
+    def get_account_by_cookie(self, cookie, auto_reload=True):
         '''
         'give the account_cookie and return the account/strategy back'
         :param cookie:
@@ -302,7 +402,7 @@ class QA_Portfolio(QA_Account):
                 account_cookie=cookie,
                 user_cookie=self.user_cookie,
                 portfolio_cookie=self.portfolio_cookie,
-                auto_reload=True
+                auto_reload=auto_reload
             )
         except:
             QA_util_log_info('Can not find this account')
@@ -404,6 +504,36 @@ class QA_Portfolio(QA_Account):
         return sum(
             [account.cash_available for account in self.accounts.values()]
         )
+    def hold_table(self, datetime=None):
+        """返回每个acc的hold
+        
+        Keyword Arguments:
+            datetime {[type]} -- [description] (default: {None})
+        """
+        return pd.concat(
+            [account.hold_table(datetime).reset_index().assign(account_cookie= account.account_cookie) for account in self.accounts.values()]
+        ).set_index(['code', 'account_cookie']).sort_index()
+
+    @property
+    def daily_cash(self):
+        # res = pd.DataFrame(sum([account.daily_cash.set_index(
+        #     'datetime').cash for account in self.accounts]))
+        # res = res.assign(date=res.index)
+        # res.date = res.date.apply(lambda x: str(x)[0:10])
+
+        return pd.concat([item.daily_cash for item in list(self.accounts.values())]).groupby(level=0).sum()\
+            .assign(account_cookie=self.portfolio_cookie).reset_index().set_index(['date', 'account_cookie'], drop=False)
+
+    @property
+    def daily_hold(self):
+        return pd.concat([account.daily_hold for account in list(self.accounts.values())])\
+            .groupby('date').sum().assign(account_cookie=self.portfolio_cookie)\
+            .reset_index().set_index(['date', 'account_cookie'])
+
+
+    @property
+    def daily_frozen(self):
+        return pd.concat([account.daily_frozen for account in list(self.accounts.values())], axis=1).sum(axis=1)
 
     # def pull(self, account_cookie=None, collection=DATABASE.account):
     #     'pull from the databases'
@@ -577,12 +707,19 @@ class QA_PortfolioView():
         self.portfolio_cookie = QA_util_random_with_topic('Portfolio')
         self.user_cookie = None
         self.market_type = account_list[0].market_type
+        self.allow_t0 = account_list[0].allow_t0
+        self.allow_sellopen = account_list[0].allow_sellopen
+        self.allow_margin = account_list[0].allow_margin
 
     def __repr__(self):
         return '< QA_PortfolioVIEW {} with {} Accounts >'.format(
             self.account_cookie,
             len(self.accounts)
         )
+
+    def set_end_date(self, date):
+        for item in self.accounts:
+            item.set_end_date(date)
 
     @property
     def contained_cookie(self):
@@ -623,7 +760,7 @@ class QA_PortfolioView():
     @property
     def code(self):
         return pd.concat(
-            [pd.Series(account.code) for account in self.accounts]
+            [pd.Series(account.code) for account in self.accounts], sort=False
         ).drop_duplicates().tolist()
 
     @property
@@ -651,32 +788,38 @@ class QA_PortfolioView():
         # res = res.assign(date=res.index)
         # res.date = res.date.apply(lambda x: str(x)[0:10])
 
-        return pd.concat([item.daily_cash for item in self.accounts]).groupby(level=0).sum()\
+        return pd.concat([item.daily_cash for item in self.accounts], sort=False).groupby(level=0).sum()\
             .assign(account_cookie=self.account_cookie).reset_index().set_index(['date', 'account_cookie'], drop=False)
 
     @property
     def daily_hold(self):
-        return pd.concat([account.daily_hold.xs(account.account_cookie, level=1) for account in self.accounts])\
+        return pd.concat([account.daily_hold for account in self.accounts], sort=False)\
             .groupby('date').sum().assign(account_cookie=self.account_cookie)\
             .reset_index().set_index(['date', 'account_cookie'])
 
+
+    @property
+    def daily_frozen(self):
+        return pd.concat([account.daily_frozen for account in self.accounts], axis=1, sort=False).sum(axis=1)
+
+
     @property
     def trade(self):
-        return pd.concat([item.trade for item in self.accounts]).groupby(level=0).sum()\
+        return pd.concat([item.trade for item in self.accounts], sort=False).groupby(level=0).sum()\
             .assign(account_cookie=self.account_cookie).reset_index().set_index(['datetime', 'account_cookie'])
 
     @property
     def history_table(self):
-        return pd.concat([item.history_table for item in self.accounts]
-                        ).sort_index()
+        return pd.concat([item.history_table for item in self.accounts], sort=False
+                         ).sort_index()
 
     @property
     def trade_day(self):
-        return pd.concat([pd.Series(item.trade_day) for item in self.accounts]
-                        ).drop_duplicates().sort_values().tolist()
+        return pd.concat([pd.Series(item.trade_day) for item in self.accounts], sort=False
+                         ).drop_duplicates().sort_values().tolist()
 
     @property
     def trade_range(self):
         return pd.concat(
-            [pd.Series(item.trade_range) for item in self.accounts]
+            [pd.Series(item.trade_range) for item in self.accounts], sort=False
         ).drop_duplicates().sort_values().tolist()
